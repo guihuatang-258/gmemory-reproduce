@@ -1,0 +1,37 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+!template.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Runtime outputs and local memory stores
+.db/
+training/
+videos/
+
+# Large downloaded datasets/assets for ALFWorld.
+# Keep the tracked task index file in data/alfworld/.
+data/alfworld/json_2.1.1/
+data/alfworld/logic/
+data/alfworld/detectors/

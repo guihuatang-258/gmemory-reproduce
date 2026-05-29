@@ -1,5 +1,4 @@
 import os
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import shutil
@@ -24,6 +23,19 @@ from prompts import get_dataset_system_prompt, get_task_few_shots
 from utils import get_model_type
 
 
+def resolve_alfworld_paths(config: dict) -> dict:
+    alfworld_data = os.getenv('ALFWORLD_DATA')
+    if not alfworld_data:
+        return config
+
+    for section in ('dataset', 'logic', 'mask_rcnn'):
+        for key, value in config.get(section, {}).items():
+            if isinstance(value, str) and value.startswith('data/alfworld'):
+                config[section][key] = value.replace('data/alfworld', alfworld_data, 1)
+
+    return config
+
+
 with open('tasks/configs.yaml') as reader:
     CONFIG: dict = yaml.safe_load(reader)
 
@@ -46,6 +58,8 @@ def build_task(task: str, mas_type: str, memory_type: str, max_steps: int) -> Ta
 
     with open(CONFIG.get(task).get('env_config_path')) as reader:
         config = yaml.safe_load(reader)
+    if task == 'alfworld':
+        config = resolve_alfworld_paths(config)
 
     env: BaseEnv = get_env(task, config, max_steps)
     recorder: BaseRecorder = get_recorder(task, working_dir=WORKING_DIR, namespace='total_task')
@@ -71,7 +85,11 @@ def build_mas(
     llm_type: str = None,
 ) -> None:
     
-    embed_func = EmbeddingFunc(CONFIG.get('embedding_model', "sentence-transformers/all-MiniLM-L6-v2")) 
+    embedding_model = os.getenv(
+        'EMBEDDING_MODEL',
+        CONFIG.get('embedding_model', "sentence-transformers/all-MiniLM-L6-v2")
+    )
+    embed_func = EmbeddingFunc(embedding_model) 
     reasoning_module_type, mas_memory_module_type = module_map(reasoning, mas_memory)
 
     llm_model: LLMCallable = GPTChat(model_name=llm_type)

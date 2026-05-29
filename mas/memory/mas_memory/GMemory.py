@@ -440,11 +440,17 @@ class TaskLayer:
                 embeddings.append(embedding)
                 valid_nodes.append(node)
 
+        if len(valid_nodes) == 0:
+            return
+        if len(valid_nodes) == 1:
+            self.graph.nodes[valid_nodes[0]]['cluster_id'] = 0
+            self._index_done()
+            return
+
         X = np.vstack(embeddings)
-        fin = FINCH(metric='cosine')
 
         try: 
-            labels = fin.fit_predict(X)
+            labels = self._finch_cluster(X)
         except Exception as e:   
             print(f"FINCH clustering failed: {e}")
             labels = np.zeros(len(valid_nodes), dtype=int)
@@ -452,6 +458,17 @@ class TaskLayer:
         for node, label in zip(valid_nodes, labels):
             self.graph.nodes[node]['cluster_id'] = int(label)
         self._index_done()
+
+    @staticmethod
+    def _finch_cluster(X: np.ndarray) -> np.ndarray:
+        try:
+            fin = FINCH(metric='cosine')
+            labels = fin.fit_predict(X)
+        except TypeError:
+            labels, _, _ = FINCH(X, distance='cosine', verbose=False)
+            if labels.ndim > 1:
+                labels = labels[:, 0]
+        return np.asarray(labels).reshape(-1)
 
     def _index_done(self) -> None:
         

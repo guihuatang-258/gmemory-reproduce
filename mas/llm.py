@@ -20,10 +20,15 @@ MAX_TOKEN = LLM_CONFIG.get("max_token", 512)
 TEMPERATURE = LLM_CONFIG.get("temperature", 0.1)
 NUM_COMPS = LLM_CONFIG.get("num_comps", 1)
 
-URL = os.environ["OPENAI_API_BASE"]
-KEY = os.environ["OPENAI_API_KEY"]
+URL = os.getenv("OPENAI_API_BASE")
+KEY = os.getenv("OPENAI_API_KEY")
+if not URL or not KEY:
+    raise RuntimeError(
+        "Missing OPENAI_API_BASE or OPENAI_API_KEY. Copy template.env to .env "
+        "and fill in your OpenRouter settings."
+    )
 print('# api url: ', URL)
-print('# api key: ', KEY)
+print('# api key configured: ', bool(KEY))
 
 
 completion_tokens, prompt_tokens = 0, 0

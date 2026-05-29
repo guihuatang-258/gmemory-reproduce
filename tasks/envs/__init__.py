@@ -1,5 +1,6 @@
 import json
 import jsonlines
+import os
 
 from .base_env import BaseEnv, BaseRecorder
 from .alfworld_env import AlfworldEnv, AlfworldRecorder, get_env_name_from_gamefile, prefixes
@@ -14,13 +15,19 @@ TASKS_PATH = {
     'sciworld': 'data/sciworld/test.jsonl',
 }
 
+ALFWORLD_DATA = os.getenv('ALFWORLD_DATA', 'data/alfworld')
+
+
+def resolve_alfworld_path(path: str) -> str:
+    return path.replace('data/alfworld', ALFWORLD_DATA, 1)
+
 ## Tasks
 alfworld_tasks: list[dict] = [
     {
         'task': f'{row["goal"]}',
         'env_kwargs': {
             'config': 'alfworld',
-            "gamefile": row["gamefile"],
+            "gamefile": resolve_alfworld_path(row["gamefile"]),
         },
         'task_type': prefixes[get_env_name_from_gamefile(row["gamefile"])],
         'env_name': get_env_name_from_gamefile(row["gamefile"])

@@ -3,6 +3,7 @@ from typing import Union, Any
 import alfworld
 import alfworld.agents.environment
 import re
+import os
 
 from .base_env import BaseEnv, BaseRecorder
 
@@ -31,12 +32,23 @@ class AlfworldEnv(BaseEnv):
     ): 
         self.env_config = env_config
         self.main_env = getattr(alfworld.agents.environment, self.env_config['env']['type'])(self.env_config, train_eval=self.env_config['split'])
+        if not self.main_env.game_files:
+            eval_ood_path = self.env_config.get('dataset', {}).get('eval_ood_data_path')
+            raise FileNotFoundError(
+                "ALFWorld found 0 games. Download/extract the ALFWorld data so "
+                f"game files exist under {eval_ood_path!r}."
+            )
         
         self.max_trials: int = max_trials
         self.reset()
     
     def set_env(self, configs: dict) -> tuple[str, str]:  
         self.gamefile = configs['env_kwargs']['gamefile']
+        if not os.path.exists(self.gamefile):
+            raise FileNotFoundError(
+                f"Missing ALFWorld game file: {self.gamefile}. "
+                "Make sure data/alfworld/json_2.1.1 is present."
+            )
         self.env_name: str = configs['env_name']
         self.main_env.game_files = [self.gamefile]
         
@@ -129,4 +141,3 @@ class AlfworldRecorder(BaseRecorder):
         self.log("cnts: " + str(self.counts))
     
     
-
