@@ -2,11 +2,13 @@ from mas.mas import MetaMAS
 from .autogen import AutoGen
 from .macnet import MacNet
 from .dylan import DyLAN
+from .cdmem_autogen import CDMemAutoGen
 
 MAS = {
     'autogen': AutoGen,
     'macnet': MacNet,
-    'dylan': DyLAN
+    'dylan': DyLAN,
+    'cdmem_autogen': CDMemAutoGen
 }
 
 def get_mas(mas_type: str) -> MetaMAS:

@@ -24,6 +24,7 @@ from mas.llm import LLMCallable, Message
 @dataclass
 class GMemory(MASMemoryBase):
     """
+    GMemory 类 → 整体架构协调器
     G-Memory: Tracing Hierarchical Memory for Multi-Agent Systems
     A three-tier hierarchical graph structure compo sed of the Insight Graph, Query Graph, and Interaction Graph.
 
@@ -75,6 +76,7 @@ class GMemory(MASMemoryBase):
 
     def add_memory(self, mas_message: MASMessage) -> None:
         """
+        稀疏化trajectory后存储到Interaction Graph
         Add the mas_message corresponding to a completed task into memory:
         Step 1: Sparsification - remove incorrect steps
         Step 2: Add the sparsified trajectories to memory
@@ -90,6 +92,7 @@ class GMemory(MASMemoryBase):
         mas_message = self._extract_mas_message(mas_message=mas_message)  
         
         # add into memory
+        # 每次添加新任务到记忆时，需要在query graph中添加一个节点并建立连接
         self.task_layer.add_task_node(mas_message.task_main)
 
         meta_data: dict = MASMessage.to_dict(mas_message)
@@ -103,8 +106,10 @@ class GMemory(MASMemoryBase):
             raise ValueError('The mas_message must have label!')
         
         # finetune and merge insights
+        # 当记忆积累到一定数量后，周期性用LLM微调insights
         if self.memory_size >= self._start_insights_threshold and self.memory_size % self._rounds_per_insights == 0:
             self.insights_layer.finetune_insights(self._insights_point_num)
+        # 记忆积累到一定数量后，周期性用 LLM 合并insights。
         if self.memory_size % 20 == 0: 
             self.insights_layer.merge_insights() 
 
@@ -118,7 +123,9 @@ class GMemory(MASMemoryBase):
         insight_windows: int = 10,
         threshold: float = 0.3
     ) -> tuple[list, list, list]:
-
+        """
+        Retrieve related tasks and insights based on the query task.
+        """
         def sort_and_filter_by_similarity(docs: list[Document], threshold: float = 0.3) -> list[tuple[Document, float]]:
             result = []
             for doc in docs:
@@ -195,7 +202,9 @@ class GMemory(MASMemoryBase):
         threshold: float = 0.3,
         **args
     ) -> tuple[list, list, list]: 
-        """Access the memory and return the results.
+        """三步检索（Query Graph → 重排序 → Insights）
+        
+        Access the memory and return the results.
 
         Args:
             query_task (str): The task to query.
@@ -207,6 +216,14 @@ class GMemory(MASMemoryBase):
         Returns:
             tuple[list, list, list]: A tuple containing successful cases, failed cases, and insights.
         """
+        
+        # 对一个新任务 query_task：
+        # 1. _retrieve_memory_raw() 先通过 TaskLayer 找相关任务。
+        # 2. 相关任务按 label=True / False 分成成功案例和失败案例。
+        # 3. 成功案例会再让 LLM 打相关性分数，选最有帮助的几个。
+        # 4. 失败案例直接取最相似的K个，用来避免重复错误。
+        # 5. InsightsManager.query_insights_with_score() 根据相关任务找到对应 insight。
+        # 6. 返回：
         
         # retrieve raw tasks
         successful_task_trajectories: list[MASMessage]
@@ -234,7 +251,7 @@ class GMemory(MASMemoryBase):
         # directly get failed tasks
         top_fail_task_trajectories = failed_task_trajectories[:failed_topk]
         
-        # directlt get insights
+        # directly get insights
         top_k_insights = insights[:insight_topk]
         self.insights_cache = top_k_insights
 
@@ -242,14 +259,16 @@ class GMemory(MASMemoryBase):
 
 
     def _extract_mas_message(self, mas_message: MASMessage) -> MASMessage:
-
+        # 对应论文里的sparsification，将interaction graph进行压缩
         mas_message_copy: MASMessage = copy.deepcopy(mas_message)
+        # state_chain就是论文中的Interaction Graph
         state_chain: StateChain = mas_message_copy.chain_of_states
-        
+
+        # 1. 移除负奖励的状态 (从后向前遍历)
         for state_id in reversed(range(len(state_chain))):
             if state_chain.get_state(state_id).graph.get('reward', 0) < 0:
                 state_chain.pop_state(state_id)
-        
+        # 2. 构建轨迹文本
         trajectory = ''
         for state in state_chain:
             trajectory += f'> {state.graph['action']}\n{state.graph['observation']}\n'
@@ -257,6 +276,9 @@ class GMemory(MASMemoryBase):
         if mas_message_copy.label == True:
             mas_message_copy.task_trajectory = trajectory
 
+#         clean_traj：去掉数字后的轨迹，避免物体编号影响泛化。
+#         key_steps：LLM 从成功轨迹中抽取关键步骤。
+#         fail_reason：失败任务由 LLM 分析错误原因。
         
         trajectory = re.sub(r'\d+', '', trajectory)
         mas_message_copy.add_extra_field('clean_traj', trajectory)
@@ -264,7 +286,8 @@ class GMemory(MASMemoryBase):
 
         system_prompt = GMemoryPrompts.extract_true_traj_system_prompt
         prompt_template = GMemoryPrompts.extract_true_traj_user_prompt
-
+        
+        # 3. LLM从轨迹中抽取关键步骤
         prompt: str = prompt_template.format(
             task=mas_message_copy.task_description,
             trajectory=mas_message_copy.get_extra_field('clean_traj')
@@ -273,7 +296,7 @@ class GMemory(MASMemoryBase):
         response: str = self.llm_model(messages, temperature=0.1)
         mas_message_copy.add_extra_field('key_steps', response)
 
-
+        # 4. 失败任务由 LLM 分析错误原因
         if mas_message_copy.label == False:
             reason: str = self._detect_mistakes(mas_message_copy)
             mas_message_copy.add_extra_field('fail_reason', reason)
@@ -291,6 +314,7 @@ class GMemory(MASMemoryBase):
 
     def backward(self, reward: bool):
 
+        # 如果某次检索出的 insight 帮助任务成功，就加分；如果失败，就扣分。分数小于等于 0 的 insight 会被清除。
         for insight in self.insights_cache:
             self.insights_layer.backward(insight, reward=-2 if reward == False else 1)
 
@@ -351,6 +375,9 @@ class GMemory(MASMemoryBase):
 
 @dataclass
 class TaskLayer:
+    """
+    Query Graph 层 - 基于任务相似性构建的图网络
+    """
     
     working_dir: str
     namespace: str
@@ -368,6 +395,7 @@ class TaskLayer:
                 self.graph = pickle.load(f)
             print(f"Graph loaded from {self._graph_save_path}")
         else:
+            # 使用 nx.Graph 存储任务节点及其相似度边
             self.graph = nx.Graph()
             print("New empty graph created")
 
@@ -391,16 +419,17 @@ class TaskLayer:
             similarity = 1 - distance
             if similarity < self.similarity_threshold:
                 continue  
-
+            
             neighbor = doc.page_content
 
             if neighbor not in self.graph:
                 self.graph.add_node(neighbor)
-
+            # 如果similarity大于阈值，新任务会和旧任务连成边
             self.graph.add_edge(task_main, neighbor, weight=similarity) 
         
         self._index_done()
- 
+    
+    # 实现k-hop图扩展检索
     def retrieve_related_task(self, query_task: str, node_num: int, hop: int = 1) -> list[str]:
         """
         Retrieve related tasks from the graph based on similarity and local neighborhood expansion.
@@ -413,15 +442,20 @@ class TaskLayer:
         Returns:
             list[str]: A list of related task nodes, including top similar tasks and their neighbors within the given hop.
         """
+        # 步骤1: 向量相似度检索 - 找到 top-k 最相似任务
         tasks: list[tuple[Document, float]] = self.task_storage.similarity_search_with_score(query=query_task, k=node_num)
-        top_nodes = [doc[0].page_content for doc in tasks]
-
+        top_nodes = [doc[0].page_content for doc in tasks] 
+        
+        # 步骤2: 图扩展 - 从 top_nodes 出发，扩展 k 跳邻居
         related_nodes = set(top_nodes)
         for node in top_nodes:
+            # 这里对应论文里的1-hop query graph expansion
+            # 使用 NetworkX 的最短路径算法，找到距离 <= hop 的所有节点
             neighbours = nx.single_source_shortest_path_length(self.graph, node, cutoff=hop).keys()
             related_nodes.update(neighbours)
         return list(related_nodes)
     
+    # 使用FINCH算法对任务聚类
     def cluster_tasks(self) -> None:
         """
         Perform clustering on tasks in the graph using their embeddings and assign cluster IDs.
@@ -471,7 +505,7 @@ class TaskLayer:
         return np.asarray(labels).reshape(-1)
 
     def _index_done(self) -> None:
-        
+        """保存 Query Graph 到磁盘"""
         with open(self._graph_save_path, "wb") as f:
             pickle.dump(self.graph, f)
 
@@ -483,6 +517,9 @@ class TaskLayer:
 
 @dataclass
 class InsightsManager:
+    """
+    Insight Graph 层 - 存储和管理抽象知识规则
+    """
 
     working_dir: str
     namespace: str
@@ -490,9 +527,11 @@ class InsightsManager:
     task_storage: Chroma
     task_layer: TaskLayer
     def __post_init__(self):
+        # 1. 加载或创建 insights 内存
         self.persist_file: str = os.path.join(self.working_dir,f'{self.namespace}.json')
+        # insights_memory 列表存储洞察节点
         self.insights_memory: list[dict] = load_json(self.persist_file) or []
-       
+        # 2. 配置日志
         log_path = os.path.join(self.working_dir, 'insights.log')
         logging.basicConfig(
             level=logging.INFO,
@@ -505,27 +544,45 @@ class InsightsManager:
         
 
     def query_insights_with_score(self, task_query: str, top_k: int = None) -> list[tuple[str, float]]:
-
+        """
+        基于任务查询检索相关的 insights
+        
+        Args:
+            task_query: 查询任务
+            top_k: 返回 top-k 个 insights
+        
+        Returns:
+            list[tuple[str, float]]: [(insight_rule, relevance_score), ...]
+        """
         SUCC_NUM, FAIL_NUM = 4, 2
-
+        
+        # 步骤1: 检索相关的成功和失败任务
         related_successful_tasks, related_failed_tasks = self._retrieve_memory(task_query, successful_topk=SUCC_NUM, failed_topk=FAIL_NUM)
+        # 步骤2: 构建相关任务列表
         task_mains: list[str] = [task.task_main for task in related_successful_tasks + related_failed_tasks]
         task_mains.append(task_query)
+        # 步骤3: 统计每个 insight 的出现频次
         insights_score = defaultdict(float)
         for task_main in task_mains:
             _, related_insights = self._find_related_insights(task_mains=[task_main])
             for insight in related_insights:
-                insights_score[insight.get('rule')] += 1  
-
+                insights_score[insight.get('rule')] += 1  # ← 频次累加
+        # 步骤4: 按频次排序
         sorted_insights = sorted(insights_score.items(), key=lambda x: x[1], reverse=True) 
         if top_k is not None:
             sorted_insights = sorted_insights[:top_k]
         return sorted_insights
     
     def merge_insights(self) -> None:
-
+        """
+        定期用LLM合并 insights - 每 20 个任务触发一次
+        基于 Query Graph 的聚类结果，对同类任务的 insights 进行合并去重
+        """
+        
+        # 步骤1: 对 Query Graph 进行聚类
         self.task_layer.cluster_tasks()
         
+        # 步骤2: 按聚类结果分组
         label_tasks: dict[int, list[str]] = {}
         for task_main, label_id in self.task_layer:
             if label_id is None:
@@ -535,10 +592,13 @@ class InsightsManager:
             else:
                 label_tasks[label_id].append(task_main)
         
+        # 步骤3: 每个聚类的 insights 单独合并
         merged_label_rules: dict[int, list[str]] = {}
         for task_type, related_task_mains in label_tasks.items():
+            # 3.1 找到与该聚类相关的所有 insights
             related_ids, related_insights = self._find_related_insights(task_mains=related_task_mains)
             related_rules: list[str] = [insight['rule'] for insight in related_insights]
+            # 3.2 用 LLM 合并规则
             merged_rules: list[str] = self._merge_rules(related_rules)
             merged_label_rules[task_type] = merged_rules
 
@@ -546,7 +606,7 @@ class InsightsManager:
             self.logger.info(f'Task type: {task_type}')
             self.logger.info(f"Origin rules: \n{'\n'.join(related_rules)}")
             self.logger.info(f"Merged rules: \n{'\n'.join(merged_rules)}")
-            
+        # 步骤4: 重建 insights 列表
         self.insights_memory.clear()
 
         for label, related_rules in merged_label_rules.items():
@@ -554,12 +614,14 @@ class InsightsManager:
             if related_task_mains is None:
                 raise RuntimeError('Inconsistency in `label`')
             
+            # 为每个合并后的规则创建一个 insight 节点
             for rule in related_rules:
+                # insight节点结构
                 insight: dict = {
-                    'rule': rule,
-                    'score': 2,          
-                    'positive_correlation_tasks': list(related_task_mains),
-                    'negative_correlation_tasks': list()
+                    'rule': rule, # insight规则文本
+                    'score': 2, # 初始分数
+                    'positive_correlation_tasks': list(related_task_mains), # 正相关任务
+                    'negative_correlation_tasks': list() # 负相关任务
                 }
                 self.insights_memory.append(insight)
         
@@ -576,11 +638,11 @@ class InsightsManager:
 
         for i in range(0, len(rules), batch_size):
             batch = rules[i:i + batch_size]
-            actual_num: int = len(batch) // 3  
+            actual_num: int = len(batch) // 3  # 目标数量: 原来的 1/3
 
             user_prompt = GMemoryPrompts.merge_rules_user_prompt.format(
                 current_rules='\n'.join(batch),
-                limited_number=actual_num//3
+                limited_number=actual_num//3 # ? 为什么要再压缩一次
             )
             messages = [Message('system', GMemoryPrompts.merge_rules_system_prompt),
                         Message('user', user_prompt)]
@@ -590,14 +652,22 @@ class InsightsManager:
         return merged_rules
 
     def backward(self, insight: str, reward: float):
-        
+        """
+        根据任务结果调整 insight 的评分
+    
+        Args:
+            insight: insight 规则文本
+            reward: 奖励值 (成功: +1, 失败: -2)
+        """
         for inner_insight in self.insights_memory:
+            # 如果当前 insight 包含指定规则，则更新分数
             if insight in inner_insight['rule']:
                 inner_insight['score'] += reward
 
         self.clear_insights()
         self._index_done()
 
+    # 分数小于等于 0 的 insight 会被清除。
     def clear_insights(self):
         self.insights_memory = [self.insights_memory[i] for i in range(len(self.insights_memory)) 
                         if self.insights_memory[i]['score'] > 0] 
@@ -647,14 +717,25 @@ class InsightsManager:
         task_mains: list[str],
         threshold: float = 1
     ) -> tuple[list[int], list[dict]]:
-
+        """
+        根据任务列表查找相关的 insights
+        
+        Args:
+            task_mains: 任务名称列表
+            threshold: 至少匹配多少个任务才算相关
+        
+        Returns:
+            (rule_indices, sorted_rules): 索引列表和 insight 列表
+        """
         rule_set: list[tuple[dict, int, int]] = []  # (rule, score, index)
 
+        # 遍历所有 insights
         for idx, rule in enumerate(self.insights_memory):
+            # # 计算匹配分数: 有多少个 task_mains 出现在 positive_correlation_tasks 中
             score: int = sum(task in rule.get('positive_correlation_tasks', []) for task in task_mains)
             if score >= threshold:
                 rule_set.append((rule, score, idx))
-
+        # 按匹配分数排序
         rule_set.sort(key=lambda x: x[1], reverse=True)
 
         rule_indices = [item[2] for item in rule_set]
@@ -662,12 +743,18 @@ class InsightsManager:
 
         return rule_indices, sorted_rules
     def finetune_insights(self, num_points: int):
-
+        """
+        定期微调 insights - 每 5 个任务触发一次
+        通过LLM生成ADD/EDIT/REMOVE/AGREE操作进行洞察演化
+        
+        Args:
+            num_points: 采样多少个任务进行微调
+        """
         SUCCESS_TASK_NUM, FAIL_TASK_NUM = 3, 1
 
         all_ids = self.task_storage.get()['ids']
         for _ in range(num_points):  
-
+            # 步骤1: 随机采样一个任务
             random_id = random.choice(all_ids)
             random_entry = self.task_storage.get(ids=[random_id])
             if 'metadatas' in random_entry and random_entry['metadatas']:
@@ -676,19 +763,24 @@ class InsightsManager:
                 raise RuntimeError('Incomplete data.')
             mas_message: MASMessage = MASMessage.from_dict(random_metadata)
 
-
+            # 步骤2: 检索相关的成功和失败案例
             true_trajs, false_trajs = self._retrieve_memory(
                 query_task=mas_message.task_main, successful_topk=SUCCESS_TASK_NUM, failed_topk=FAIL_TASK_NUM
             )
+            # 将采样任务加入对应类别
             if mas_message.label == True:
                 true_trajs.append(mas_message)
             else:
                 false_trajs.append(mas_message)
+                
+            # 步骤3: 查找与这些任务相关的 insights
             all_task_mains: list[str] = [traj.task_main for traj in true_trajs + false_trajs]
-
-            related_insight_ids, _ = self._find_related_insights(all_task_mains, len(all_task_mains) / 2)
+            # 阈值: 至少匹配一半任务，即只选择与all_task_mains中多数任务相关的 insights
+            related_insight_ids, _ = self._find_related_insights(all_task_mains, len(all_task_mains) / 2) 
+            # 步骤4: LLM 驱动的微调
             self._finetune_insights(true_trajs, false_trajs, related_insight_ids)
         
+        # 步骤5: 清理低分 insights
         self.clear_insights()
         self._index_done()
     def _finetune_insights(
@@ -764,6 +856,7 @@ class InsightsManager:
             self.logger.info(response)
             self.logger.info('\n---------------\n')
         
+        # 会删掉小于0分的insights
         self.clear_insights()
         self._index_done()
 
@@ -829,30 +922,36 @@ class InsightsManager:
         max_rules_num: int = 10
     ) -> None:
 
+        # 用于过滤无效操作
         delete_indices = []
         for i in range(len(operations)):
             operation, operation_rule_text = operations[i]
             operation_type = operation.split(' ')[0]
             rule_num = int(operation.split(' ')[1]) if ' ' in operation else None
 
-            if operation_type == 'ADD':    
+            # 添加新规则
+            if operation_type == 'ADD':
+                # 如果规则已存在，操作无效
                 if self._is_existing_rule(operation_rule_text): 
                     delete_indices.append(i)
-                    
+            
+            # 编辑规则
             elif operation_type == 'EDIT':   
+                # 如果编辑后的文本已存在，转为AGREE操作
                 if self._is_existing_rule(operation_rule_text): 
                     rule_num: int = self._retrieve_rule_index(operation_rule_text)
                     operations[i] = (f'AGREE {rule_num + 1}', operation_rule_text)   
 
                 elif (rule_num is None) or (rule_num > len(self.insights_memory)) or (rule_num <= 0):   
-                    delete_indices.append(i)
-                        
+                    delete_indices.append(i)# 规则编号越界或不存在
+            
+            # 删除或同意规则
             elif operation_type == 'REMOVE' or operation_type == 'AGREE':  
                 if (rule_num is None) or (rule_num > len(self.insights_memory)) or (rule_num <= 0):   
-                    delete_indices.append(i)
+                    delete_indices.append(i) # 规则编号越界或不存在
             
             else: 
-                delete_indices.append(i)
+                delete_indices.append(i) # LLM生成了格式错误的操作，直接删除
 
         operations = [operations[i] for i in range(len(operations)) if i not in delete_indices] 
         
@@ -869,26 +968,26 @@ class InsightsManager:
                     rule_index = int(operation.split(' ')[1]) - 1
                     rule_data: dict = self.insights_memory[rule_index]
                     remove_strength = 3 if list_full else 1
-                    rule_data['score'] -= remove_strength
+                    rule_data['score'] -= remove_strength # 删除规则，默认-3 分（不是直接删除，而是降低分数）
                     rule_data['negative_correlation_tasks'] = list(set(rule_data['negative_correlation_tasks'] + relative_tasks))  
 
                 elif operation_type == 'AGREE':
                     rule_index: int = self._retrieve_rule_index(operation_rule_text) 
                     rule_data: dict = self.insights_memory[rule_index]
-                    rule_data['score'] += 1
+                    rule_data['score'] += 1 # 同意规则，+1 分
                     rule_data['positive_correlation_tasks'] = list(set(rule_data['positive_correlation_tasks'] + relative_tasks))
 
                 elif operation_type == 'EDIT': 
                     rule_index = int(operation.split(' ')[1]) - 1
                     rule_data: dict = self.insights_memory[rule_index]
                     rule_data['rule'] = operation_rule_text
-                    rule_data['score'] += 1
+                    rule_data['score'] += 1 # 编辑规则，+1 分
                     rule_data['positive_correlation_tasks'] = list(set(rule_data['positive_correlation_tasks'] + relative_tasks))
 
                 elif operation_type == 'ADD': 
                     meta_data: dict = {
                         'rule': operation_rule_text,
-                        'score': 2,         
+                        'score': 2, # 添加新规则，初始为2分
                         'positive_correlation_tasks': list(relative_tasks),
                         'negative_correlation_tasks': list()
                     }

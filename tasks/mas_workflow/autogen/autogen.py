@@ -181,7 +181,7 @@ class AutoGen(MetaMAS):
                 user_instruction=user_prompt,
                 message=action,
             )
-            self.meta_memory.add_agent_node(agent_message, upstream_agent_ids=[])
+            self.meta_memory.add_agent_node(agent_message, upstream_agent_ids=[]) # upstream_agent_ids始终为空，说明agent之间独立工作，没有空间依赖
 
             observation, reward, done = env.step(action)
             action_history.append(action)

@@ -38,11 +38,11 @@ class AgentMessage:
         message (Optional[str]): The core message content (response or statement).
         extra_fields (dict[str, Any]): A dictionary to hold additional custom fields or metadata.
     """
-    agent_name: Optional[str] = None
-    system_instruction: Optional[str] = None
-    user_instruction: Optional[str]  = None
-    message: Optional[str] = None
-    extra_fields: dict[str, Any] = field(default_factory=dict)
+    agent_name: Optional[str] = None # 发送消息的agent的名称
+    system_instruction: Optional[str] = None # system prompt
+    user_instruction: Optional[str]  = None # user prompt
+    message: Optional[str] = None # agent的输出
+    extra_fields: dict[str, Any] = field(default_factory=dict) # 额外的字段，用于存储其他信息
 
     def add_extra_field(self, key: str, value: Any):
         self.extra_fields[key] = value
@@ -53,6 +53,7 @@ class AgentMessage:
 @dataclass
 class StateChain:
     """
+    对应论文中的Interaction Graph结构
     Manages a chain of directed graph states representing the evolution of agent messages and their relationships.
 
     Each state is a NetworkX DiGraph, where nodes represent agent messages and edges represent connections (e.g., spatial edges)
@@ -64,7 +65,7 @@ class StateChain:
     def __post_init__(self):
         initial_state = nx.DiGraph()
         initial_state.graph["name_counter"] = {}
-        self._chain_of_states = [initial_state]
+        self._chain_of_states = [initial_state] # StateChain就是一个state的list，每个元素是一个nx.DiGraph
 
     def __iter__(self) -> Iterator[nx.DiGraph]:
         return iter(self.chain_of_states)
@@ -78,8 +79,10 @@ class StateChain:
 
         agent_message_dict: dict = asdict(agent_message)
         node_id = self._generate_node_id(agent_message.agent_name)
+        # 给当前state的图添加一个节点，节点存的是agent_message
         current_state.add_node(node_id, **agent_message_dict)
-        
+        # 给当前state的图添加一个边，将新node和upstream_agent_ids中的每个node连接起来
+        # ?这个边的含义是什么？为什么论文Section3说是temporal
         for up_node_id in upstream_agent_ids:
             if not current_state.has_node(up_node_id):
                 raise ValueError("Upstream node does not exist.")
@@ -87,10 +90,14 @@ class StateChain:
         return node_id
 
     def move_state(self, action: str, observation: str, **args) -> None:
-
+        """
+        Move the state chain to the next state, updating the current state with the action and observation.
+        """
         current_state: nx.DiGraph = self._get_current_state()
+        # 更新当前state的图的action和observation字段
         current_state.graph.update({"action": action, "observation": observation, **args})
 
+        # 创建新的state
         initial_state = nx.DiGraph()
         initial_state.graph["name_counter"] = {}
         self._chain_of_states.append(initial_state)

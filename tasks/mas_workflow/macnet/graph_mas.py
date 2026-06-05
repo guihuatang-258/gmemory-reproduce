@@ -75,7 +75,7 @@ class MacNet(MetaMAS):
         """
         def get_state_graph_upstream_node_ids(node: Node, upstream_node_ids: dict[str, str]) -> list[str]:
             upstream_ids: list[str] = []
-            for node in node.spatial_predecessors:
+            for node in node.spatial_predecessors: # upstream_ids存的都是node的空间前驱，表示node依赖于前驱的输出
                 if node.id not in upstream_node_ids.keys():
                     raise ValueError('Upstream node should be in the `upstream_node_ids` dict.')
                 upstream_ids.append(upstream_node_ids.get(node.id))

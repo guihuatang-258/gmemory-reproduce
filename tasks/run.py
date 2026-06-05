@@ -107,8 +107,9 @@ def build_mas(
 def run_task(task_manager: TaskManager) -> None:
 
     task_manager.recorder.dataset_begin()
-    
-    for task_id, task_config in tqdm(enumerate(task_manager.tasks), total=len(task_manager.tasks), desc="Running Tasks"):
+    # 修改为只跑前N个任务
+    MAX_TASKS = 5  # 只跑10个任务
+    for task_id, task_config in tqdm(enumerate(task_manager.tasks[:MAX_TASKS]), total=MAX_TASKS, desc="Running Tasks"):
         task_manager.recorder.task_begin(task_id, task_config)  
         
         task_main, task_description = task_manager.mas.env.set_env(task_config)   
@@ -138,7 +139,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Run tasks with specified modules.')
     parser.add_argument('--task', type=str, choices=['alfworld', 'fever', 'pddl', 'sciworld'])
-    parser.add_argument('--mas_type', type=str, choices=['autogen', 'macnet', 'dylan'])
+    parser.add_argument('--mas_type', type=str, choices=['autogen', 'macnet', 'dylan', 'cdmem_autogen'])
     parser.add_argument('--mas_memory', type=str, default='none', help='Specify mas memory module')
     parser.add_argument('--reasoning', type=str, default='io', help='Specify reasoning module')
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0125', help='Specify the LLM model type')

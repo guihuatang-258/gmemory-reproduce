@@ -27,6 +27,13 @@ pddl:
 autogen:
   autogen:  True
 
+cdmem_autogen:
+  successful_topk: 1
+  failed_topk: 1
+  insights_topk: 3
+  threshold: 0
+  critic_revise: True
+
 graph:
   graph_type: Random
   node_num: 3
